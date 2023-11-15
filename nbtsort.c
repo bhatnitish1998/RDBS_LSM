@@ -64,7 +64,7 @@
 #include "utils/tuplesort.h"
 
 #include "lsm_meta_data.h"
-bool lsm_tree_flag = true;
+static bool lsm_tree_flag = true;
 
 /* Magic numbers for parallel state sharing */
 #define PARALLEL_KEY_BTREE_SHARED		UINT64CONST(0xA000000000000001)
@@ -354,7 +354,7 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
     if(lsm_tree_flag)
     {
         //  ADDED CODE : Get pointer to just next of BT meta data and write lsm meta data
-        elog(NOTICE,"end of btbuild method, saving metadata now");
+        printf("end of btbuild method, saving metadata now\n");
         // Get Metapage buffer for the btree index with access type write
         Buffer buffer_t = _bt_getbuf(index,BTREE_METAPAGE,BT_WRITE);
         // Get MetaPageData
@@ -363,6 +363,12 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
         // get pointer just after BT meta data and fill lsm meta data there
         struct lsm_meta_data *lsm_md = (struct lsm_meta_data *)(meta_t +1);
 
+        // change page header lower pointer and mark buffer as dirty
+        PageHeader pageHeader = (PageHeader)page_t;
+        pageHeader->pd_lower = pageHeader->pd_lower +sizeof(struct lsm_meta_data);
+        MarkBufferDirty(buffer_t);
+
+        printf("lsm meta data at %x to %x\n",lsm_md,lsm_md+sizeof(struct lsm_meta_data));
         // set lsm meta data
         lsm_md->l0_size=0;
         lsm_md->l1_size=0;
@@ -375,9 +381,9 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
         lsm_md->l0_max_size =5;
         lsm_md->l1_max_size =10;
 
-        elog(NOTICE,"L0 created oid %d",lsm_md->l0_id);
-        lsm_md->l0_size = result->index_tuples;
-        elog(NOTICE,"Tuples indexed by build %d",lsm_md->l0_size);
+        printf("L0 created oid %d\n",lsm_md->l0_id);
+        lsm_md->l0_size = (int)result->index_tuples;
+        printf("Tuples indexed by build %d\n",lsm_md->l0_size);
 
         // release the buffer
         _bt_relbuf(index,buffer_t);

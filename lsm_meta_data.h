@@ -6,6 +6,7 @@
 #define POSTGRESQL_LSM_META_DATA_H
 
 #include "../../../include/postgres.h"
+
 struct lsm_meta_data
 {
     int l0_size;

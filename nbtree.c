@@ -38,6 +38,7 @@
 #include "utils/memutils.h"
 
 #include "lsm_meta_data.h"
+static bool lsm_tree_flag = true;
 
 /*
  * BTPARALLEL_NOT_INITIALIZED indicates that the scan has not started.
@@ -156,30 +157,35 @@ btbuildempty(Relation index)
 	metapage = (Page) palloc(BLCKSZ);
 	_bt_initmetapage(metapage, P_NONE, 0, _bt_allequalimage(index, false));
 
+    if (lsm_tree_flag) {
+        //  ADDED CODE : Get pointer to just next of BT meta data and write lsm meta data
+        printf( "btbuildempty started\n");
 
-    //  ADDED CODE : Get pointer to just next of BT meta data and write lsm meta data
-    elog(NOTICE,"btbuildempty started");
+        BTMetaPageData *meta_t = BTPageGetMeta(metapage);
+        // get pointer just after BT meta data and fill lsm meta data there
+        struct lsm_meta_data *lsm_md = (struct lsm_meta_data *) (meta_t + 1);
+        printf("lsm meta data at %x to %x\n",lsm_md,lsm_md+sizeof(struct lsm_meta_data));
 
-    BTMetaPageData* meta_t =BTPageGetMeta(metapage);
-    // get pointer just after BT meta data and fill lsm meta data there
-    struct lsm_meta_data *lsm_md = (struct lsm_meta_data *)(meta_t +1);
+        // set lsm meta data
+        lsm_md->l0_size = 0;
+        lsm_md->l1_size = 0;
+        lsm_md->l2_size = 0;
+        lsm_md->l0_id = index->rd_id;
+        lsm_md->l1_id = InvalidOid;
+        lsm_md->l2_id = InvalidOid;
+        // identify table on which relation is built
+        lsm_md->rel_id = index->rd_index->indrelid;
+        lsm_md->l0_max_size = 5;
+        lsm_md->l1_max_size = 10;
 
-    // set lsm meta data
-    lsm_md->l0_size=0;
-    lsm_md->l1_size=0;
-    lsm_md->l2_size=0;
-    lsm_md->l0_id = index->rd_id;
-    lsm_md->l1_id = InvalidOid;
-    lsm_md->l2_id = InvalidOid;
-    // identify table on which relation is built
-    lsm_md->rel_id = index->rd_index->indrelid;
-    lsm_md->l0_max_size =5;
-    lsm_md->l1_max_size =10;
+        // set new page header
+        PageHeader pageHeader = (PageHeader)metapage;
+        pageHeader->pd_lower = pageHeader->pd_lower +sizeof(struct lsm_meta_data);
 
-    elog(NOTICE,"L0 created oid %d",lsm_md->l0_id);
-    lsm_md->l0_size = 0;
-    elog(NOTICE,"Tuples indexed by build %d",lsm_md->l0_size);
-
+        printf("L0 created oid %d\n", lsm_md->l0_id);
+        lsm_md->l0_size = 0;
+        printf("Tuples indexed by build %d\n", lsm_md->l0_size);
+    }
 	/*
 	 * Write the page and log it.  It might seem that an immediate sync would
 	 * be sufficient to guarantee that the file exists on disk, but recovery
@@ -225,6 +231,47 @@ btinsert(Relation rel, Datum *values, bool *isnull,
 
 	pfree(itup);
 
+    // ADDED CODE
+    if(lsm_tree_flag)
+    {
+       printf("end of btinsert method, checking if overflow\n");
+       // Read lsm meta data
+        Buffer buffer_t = _bt_getbuf(rel,BTREE_METAPAGE,BT_WRITE);
+        Page page_t = BufferGetPage(buffer_t);
+        BTMetaPageData* meta_t =BTPageGetMeta(page_t);
+
+        struct lsm_meta_data *lsm_md = (struct lsm_meta_data *)(meta_t +1);
+        printf("lsm meta data at %x to %x\n",lsm_md,lsm_md+sizeof(struct lsm_meta_data));
+
+        lsm_md->l0_size= lsm_md->l0_size+ 1;
+
+        printf("current lsm size %d\n",lsm_md->l0_size);
+        _bt_relbuf(rel,buffer_t);
+
+        // check overflow
+        if(lsm_md->l0_size > lsm_md->l0_max_size)
+        {
+            elog(NOTICE, "lsm 0 overflow detected");
+            if(lsm_md->l1_id== InvalidOid)
+            {
+                // create l1 tree
+            }
+            // merge l0 to l1 and clear l0
+
+            // overflow from l1
+            if(lsm_md->l1_size> lsm_md->l1_max_size)
+            {
+                if(lsm_md->l2_id== InvalidOid)
+                {
+                    // create l2 tree
+                }
+                // merge l1 to l2 clear l1
+
+            }
+
+        }
+
+    }
 	return result;
 }
 
