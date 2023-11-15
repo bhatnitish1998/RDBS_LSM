@@ -351,8 +351,11 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	}
 #endif							/* BTREE_BUILD_STATS */
 
-    if(lsm_tree_flag)
+    char * relation_name = heap->rd_rel->relname.data;
+    char check[3]={relation_name[0],relation_name[1],relation_name[2]};
+    if(lsm_tree_flag && (strcmp(check,"pg_")))
     {
+
         //  ADDED CODE : Get pointer to just next of BT meta data and write lsm meta data
         printf("end of btbuild method, saving metadata now\n");
         // Get Metapage buffer for the btree index with access type write

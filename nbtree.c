@@ -38,6 +38,8 @@
 #include "utils/memutils.h"
 
 #include "lsm_meta_data.h"
+#include "catalog/index.h"
+#include "catalog/storage.h"
 static bool lsm_tree_flag = true;
 
 /*
@@ -232,7 +234,9 @@ btinsert(Relation rel, Datum *values, bool *isnull,
 	pfree(itup);
 
     // ADDED CODE
-    if(lsm_tree_flag)
+    char * relation_name = heapRel->rd_rel->relname.data;
+    char check[3]={relation_name[0],relation_name[1],relation_name[2]};
+    if(lsm_tree_flag && (strcmp(check,"pg_")))
     {
        printf("end of btinsert method, checking if overflow\n");
        // Read lsm meta data
@@ -243,34 +247,139 @@ btinsert(Relation rel, Datum *values, bool *isnull,
         struct lsm_meta_data *lsm_md = (struct lsm_meta_data *)(meta_t +1);
         printf("lsm meta data at %x to %x\n",lsm_md,lsm_md+sizeof(struct lsm_meta_data));
 
-        lsm_md->l0_size= lsm_md->l0_size+ 1;
-
-        printf("current lsm size %d\n",lsm_md->l0_size);
+        // buffer lock not held problems or truncate problems
+        struct lsm_meta_data *lsm_copy = palloc(sizeof(struct lsm_meta_data));
+        memcpy(lsm_copy,lsm_md,sizeof (struct lsm_meta_data));
         _bt_relbuf(rel,buffer_t);
 
+        lsm_copy->l0_size= lsm_copy->l0_size+ 1;
+
+        printf("current lsm size %d\n",lsm_copy->l0_size);
+//        _bt_relbuf(rel,buffer_t);
+
         // check overflow
-        if(lsm_md->l0_size > lsm_md->l0_max_size)
+        if(lsm_copy->l0_size >= lsm_copy->l0_max_size)
         {
-            elog(NOTICE, "lsm 0 overflow detected");
-            if(lsm_md->l1_id== InvalidOid)
+            printf("lsm 0 overflow detected\n");
+            if(lsm_copy->l1_id== InvalidOid)
             {
                 // create l1 tree
+
+                // get new name for index and create copy
+                char *oldname = rel->rd_rel->relname.data;
+                char * newname = palloc(NAMEDATALEN);
+                strcpy(newname,oldname);
+                strcat(newname,"l1");
+                lsm_copy->l1_id=index_concurrently_create_copy(heapRel,rel->rd_id,rel->rd_rel->reltablespace,newname);
+                printf("%d return by create copy %d",lsm_copy->l0_id,lsm_copy->l1_id);
+                // build index of current on l1;
+                Relation t = index_open(lsm_copy->l1_id,AccessExclusiveLock);
+                index_build(heapRel,t, BuildIndexInfo(t),false,false);
+                index_close(t,AccessExclusiveLock);
+
+                // set size of l1
+                printf("created l1 tree oid : %d\n",lsm_copy->l1_id);
+
             }
+
             // merge l0 to l1 and clear l0
+            printf("Merging lo oid : %d ,  l1 oid : %d\n",lsm_copy->l0_id,lsm_copy->l1_id);
+            Relation t = index_open(lsm_copy->l1_id,AccessExclusiveLock);
+
+            IndexScanDesc scan = index_beginscan(heapRel,rel,SnapshotAny,0,0);
+            scan->xs_want_itup=true;
+            btrescan(scan,NULL,0,0,0);
+
+            // point to first tuple
+            _bt_first(scan, ForwardScanDirection);
+            do
+            {
+                IndexTuple itup_local = scan->xs_itup;
+                _bt_doinsert(rel,itup_local,UNIQUE_CHECK_NO,false,heapRel);
+            }
+            while(_bt_next(scan,ForwardScanDirection));
+
+            lsm_copy->l1_size+=lsm_copy->l0_size;
+            printf("finished adding l0 entries to l1\n");
+            index_endscan(scan);
+            index_close(t,AccessExclusiveLock);
+
+            // clear l0 [rel, rel id,]
+            printf("clearing l0 index\n");
+            RelationTruncate(rel,0);
+            IndexInfo* index_info = BuildDummyIndexInfo(rel);
+            index_build(heapRel,rel,index_info,true,false);
+
+            lsm_copy->l0_size =0;
+            printf("truncate successful\n");
 
             // overflow from l1
-            if(lsm_md->l1_size> lsm_md->l1_max_size)
+            if(lsm_copy->l1_size>= lsm_copy->l1_max_size)
             {
-                if(lsm_md->l2_id== InvalidOid)
+                if(lsm_copy->l2_id== InvalidOid)
                 {
                     // create l2 tree
+                    // get new name for index and create copy
+                    Relation l1_rel = index_open(lsm_copy->l1_id,AccessExclusiveLock);
+                    char *oldname = l1_rel->rd_rel->relname.data;
+                    char * newname = palloc(NAMEDATALEN);
+                    strcpy(newname,oldname);
+                    strcat(newname,"l2");
+                    lsm_copy->l2_id=index_concurrently_create_copy(heapRel,l1_rel->rd_id,l1_rel->rd_rel->reltablespace,newname);
+                    printf("L1 : %d return by create copy L2: %d",lsm_copy->l1_id,lsm_copy->l2_id);
+                    // build index of current on l1;
+                    Relation t = index_open(lsm_copy->l2_id,AccessExclusiveLock);
+                    index_build(heapRel,t, BuildIndexInfo(t),false,false);
+                    index_close(t,AccessExclusiveLock);
+                    index_close(l1_rel,AccessExclusiveLock);
+                    // set size of l1
+                    printf("created l2 tree oid : %d\n",lsm_copy->l1_id);
                 }
                 // merge l1 to l2 clear l1
+                printf("Merging l1 oid : %d ,  l2 oid : %d\n",lsm_copy->l1_id,lsm_copy->l2_id);
+                Relation t = index_open(lsm_copy->l2_id,AccessExclusiveLock);
+                Relation l1_rel = index_open(lsm_copy->l1_id,AccessExclusiveLock);
 
+                IndexScanDesc scan = index_beginscan(heapRel,l1_rel,SnapshotAny,0,0);
+                scan->xs_want_itup=true;
+                btrescan(scan,NULL,0,0,0);
+
+                // point to first tuple
+                _bt_first(scan, ForwardScanDirection);
+                do
+                {
+                    IndexTuple itup_local = scan->xs_itup;
+                    _bt_doinsert(l1_rel,itup_local,UNIQUE_CHECK_NO,false,heapRel);
+                }
+                while(_bt_next(scan,ForwardScanDirection));
+
+                lsm_copy->l2_size+=lsm_copy->l1_size;
+                printf("finished adding l1 entries to l2\n");
+                index_endscan(scan);
+                index_close(t,AccessExclusiveLock);
+
+
+                // clear l1
+                printf("clearing l1 index\n");
+                RelationTruncate(l1_rel,0);
+                IndexInfo* index_info = BuildDummyIndexInfo(l1_rel);
+                index_build(heapRel,l1_rel,index_info,true,false);
+
+                lsm_copy->l1_size =0;
+                printf("truncate successful\n");
+                index_close(l1_rel,AccessExclusiveLock);
             }
 
         }
+        buffer_t = _bt_getbuf(rel,BTREE_METAPAGE,BT_WRITE);
+        page_t = BufferGetPage(buffer_t);
+        meta_t =BTPageGetMeta(page_t);
+        lsm_md = (struct lsm_meta_data *)(meta_t +1);
+        memcpy(lsm_md,lsm_copy,sizeof (struct lsm_meta_data));
+        _bt_relbuf(rel,buffer_t);
 
+        // print sizes
+        printf("Sizes = L0 : %d  L1 : %d  L2  %d\n",lsm_md->l0_size,lsm_md->l1_size, lsm_md->l2_size);
     }
 	return result;
 }
